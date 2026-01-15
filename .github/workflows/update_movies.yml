@@ -36,5 +36,6 @@ jobs:
         git config --global user.email "bot@github.com"
         git add movies.json index.html || echo "Dosyalar zaten ekli"
         git commit -m "Otomatik guncelleme" || echo "Degisiklik yok"
+        # -- ASIL COZUM BURADA --
         git pull --rebase origin main
         git push
