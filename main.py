@@ -6,7 +6,6 @@ import time
 from urllib.parse import urlparse
 
 # --- AYARLAR ---
-# Burasi cok onemli, site adresi degistiyse buradan guncellemelisin.
 BASE_URL = os.environ.get('SITE_URL', 'https://dizipal1225.com/filmler')
 DATA_FILE = 'movies.json'
 HTML_FILE = 'index.html'
@@ -16,7 +15,6 @@ def get_base_domain(url):
     return f"{parsed.scheme}://{parsed.netloc}"
 
 def get_scraper():
-    """Bot korumasini asan ozel tarayici olusturur."""
     return cloudscraper.create_scraper(
         browser={
             'browser': 'chrome',
@@ -25,49 +23,62 @@ def get_scraper():
         }
     )
 
+def get_video_source(scraper, movie_url):
+    """Filmin detay sayfasina girer ve iframe video linkini alir."""
+    try:
+        # Detay sayfasina git
+        response = scraper.get(movie_url, timeout=10)
+        if response.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Iframe'i bul (Eski kodundaki mantik)
+        iframe = soup.find('iframe', id='iframe')
+        if iframe and 'src' in iframe.attrs:
+            return iframe['src']
+            
+        return None
+    except Exception as e:
+        print(f"Video linki alinamadi ({movie_url}): {e}")
+        return None
+
 def parse_films(soup, base_domain):
-    """HTML icinden film bilgilerini ayiklar."""
+    """Sadece listedeki temel bilgileri alir."""
     films = []
-    # Site temasina uygun seciciler
     elements = soup.select('li.movie-item') or soup.select('li.item') or soup.find_all('li')
 
     for el in elements:
         try:
-            # Baglanti ve ID bulma
             link_el = el.find('a')
             if not link_el: continue
             
-            movie_id = link_el.get('data-id') # API icin gerekli ID
+            movie_id = link_el.get('data-id')
             href = link_el.get('href', '')
             
-            # Tam URL olustur
             if href and not href.startswith('http'):
                 full_url = base_domain + href
             else:
                 full_url = href
 
-            # Baslik
             title_el = el.find('span', class_='title') or el.find('h2') or el.find('h3')
             title = title_el.text.strip() if title_el else "Isimsiz"
 
-            # Resim
             img_el = el.find('img')
             image = img_el.get('data-src') or img_el.get('src') or ""
 
-            # Diger Bilgiler
             imdb_el = el.find('span', class_='imdb')
             imdb = imdb_el.text.strip() if imdb_el else "-"
             
             year_el = el.find('span', class_='year')
             year = year_el.text.strip() if year_el else ""
 
-            # Eger baslik ve link varsa listeye ekle
             if title != "Isimsiz" and "dizipal" in full_url:
                 films.append({
                     "id": movie_id,
                     "title": title,
                     "image": image,
-                    "url": full_url,
+                    "url": full_url, # Sayfa linki (Video linki asagida alinacak)
                     "imdb": imdb,
                     "year": year
                 })
@@ -83,46 +94,44 @@ def get_all_films():
     all_films = []
     processed_titles = set()
     
-    print(f"Tarama Baslatiliyor: {BASE_URL}")
+    print(f"Derin Tarama Baslatiliyor: {BASE_URL}")
+    print("Her filmin icine girilecegi icin islem uzun sürebilir...")
     print("------------------------------------------------")
 
-    # 1. SAYFA (Ana Sayfa)
+    # --- 1. SAYFA ---
     try:
         response = scraper.get(BASE_URL, timeout=30)
         if response.status_code != 200:
-            print(f"HATA: Siteye girilemedi. Kod: {response.status_code}")
-            # Site adresi yanlis olabilir veya bot engellenmis olabilir
+            print("Siteye girilemedi.")
             return []
             
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Kontrol amaciyla sayfa basligini yazdiralim
-        page_title = soup.title.text.strip() if soup.title else "Baslik Yok"
-        print(f"Site Basligi: {page_title}")
-        
-        if "Just a moment" in page_title or "Cloudflare" in page_title:
-            print("DIKKAT: Cloudflare korumasina takildi. Bot tekrar deneyecek.")
-            
         new_films = parse_films(soup, base_domain)
         
-        if not new_films:
-            print("UYARI: Sayfa cekildi ama film bulunamadi. CSS seciciler uyusmuyor olabilir.")
-            
+        # Her bulunan filmin icine girip video linkini alalim
         for f in new_films:
             if f['title'] not in processed_titles:
+                print(f"Video aranıyor: {f['title']}...")
+                # Burasi filmin icine girdigimiz yer
+                video_src = get_video_source(scraper, f['url'])
+                
+                # Eger video linki bulduysak onu kaydet, bulamazsak sayfa linkini birak
+                f['videoUrl'] = video_src if video_src else f['url']
+                
                 all_films.append(f)
                 processed_titles.add(f['title'])
+                time.sleep(0.5) # Hizli istek atip engellenmemek icin bekleme
                 
-        print(f"Sayfa 1 OK. Toplam: {len(all_films)} film.")
+        print(f"Sayfa 1 Tamam. ({len(all_films)} Film)")
         
     except Exception as e:
-        print(f"Baglanti Hatasi: {e}")
+        print(f"Hata: {e}")
         return []
 
-    # 2. API DONGUSU (Sonsuz Kaydirmayi Taklit Et)
+    # --- 2. API DONGUSU ---
     page = 1
-    # Test icin sonsuz donguyu limitli tutalim (Github sunucusu kilitlenmesin)
-    MAX_PAGES = 50 
+    # Test icin sayfa limiti (Istersen 50 yapabilirsin ama sure uzar)
+    MAX_PAGES = 100 
     
     while page < MAX_PAGES:
         if not all_films: break
@@ -130,11 +139,9 @@ def get_all_films():
         last_film = all_films[-1]
         last_id = last_film.get('id')
         
-        if not last_id:
-            print("Son film ID'si yok, dongu bitti.")
-            break
+        if not last_id: break
             
-        print(f"Siradaki yukleniyor... (Ref ID: {last_id})")
+        print(f"Siradaki sayfa listesi cekiliyor (Ref: {last_id})...")
         
         try:
             payload = {'movie': last_id, 'year': '', 'tur': '', 'siralama': ''}
@@ -143,11 +150,9 @@ def get_all_films():
             try:
                 data = response.json()
             except:
-                print("API JSON dondurmedi (Cloudflare engeli olabilir).")
                 break
                 
             if not data or not data.get('html'):
-                print("Daha fazla veri gelmedi. Islem tamam.")
                 break
                 
             html_part = BeautifulSoup(data['html'], 'html.parser')
@@ -156,17 +161,22 @@ def get_all_films():
             added_count = 0
             for f in more_films:
                 if f['title'] not in processed_titles:
+                    # YENI KISIM: Her yeni gelen filmin de içine gir
+                    print(f">> Video cekiliyor: {f['title']}")
+                    video_src = get_video_source(scraper, f['url'])
+                    f['videoUrl'] = video_src if video_src else f['url']
+                    
                     all_films.append(f)
                     processed_titles.add(f['title'])
                     added_count += 1
+                    time.sleep(0.5) # Bekleme
             
             if added_count == 0:
-                print("Yeni film bulunamadi. Dongu bitiyor.")
+                print("Yeni film yok. Bitti.")
                 break
                 
             page += 1
-            print(f"Sayfa {page} Eklendi (+{added_count}). Toplam: {len(all_films)}")
-            time.sleep(2) # Cloudflare kizmasin diye yavasla
+            print(f"--- Sayfa {page} Tamamlandi. Toplam: {len(all_films)} ---")
             
         except Exception as e:
             print(f"Dongu hatasi: {e}")
@@ -182,29 +192,30 @@ def create_html(films):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dizipal Arsiv</title>
+    <title>Dizipal Ozel Arsiv</title>
     <style>
-        body {{ background-color: #202020; color: #fff; font-family: sans-serif; margin: 0; padding: 0; }}
-        .header {{ background: #111; padding: 15px; position: sticky; top:0; z-index:999; display: flex; flex-direction: column; align-items: center; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }}
-        h1 {{ margin: 5px 0; font-size: 1.5rem; color: #e50914; }}
-        #searchInput {{ padding: 10px; border-radius: 5px; border: none; width: 90%; max-width: 400px; margin-top: 10px; background: #333; color: white; }}
+        body {{ background-color: #141414; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; }}
+        .header {{ background: #000; padding: 15px; position: sticky; top:0; z-index:999; display: flex; flex-direction: column; align-items: center; border-bottom: 1px solid #333; }}
+        h1 {{ margin: 5px 0; font-size: 1.5rem; color: #E50914; text-transform: uppercase; letter-spacing: 2px; }}
+        #searchInput {{ padding: 12px; border-radius: 4px; border: none; width: 90%; max-width: 500px; margin-top: 10px; background: #333; color: white; font-size: 1rem; }}
         
-        .container {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; padding: 15px; }}
+        .container {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 15px; }}
         
-        .card {{ background: #2b2b2b; border-radius: 5px; overflow: hidden; position: relative; transition: transform 0.2s; }}
-        .card:hover {{ transform: scale(1.03); z-index: 10; }}
+        .card {{ background: #1f1f1f; border-radius: 4px; overflow: hidden; position: relative; transition: transform 0.3s; cursor: pointer; }}
+        .card:hover {{ transform: scale(1.05); z-index: 10; box-shadow: 0 0 10px rgba(0,0,0,0.5); }}
         .card img {{ width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; }}
         
-        .info {{ padding: 8px; }}
-        .title {{ font-weight: bold; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 5px; }}
-        .meta {{ font-size: 0.75rem; color: #aaa; display: flex; justify-content: space-between; }}
-        .imdb {{ color: #f5c518; font-weight: bold; }}
+        .info {{ padding: 10px; position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(to top, rgba(0,0,0,0.9), transparent); opacity: 0; transition: opacity 0.3s; }}
+        .card:hover .info {{ opacity: 1; }}
         
-        .btn-watch {{ display: block; background: #e50914; color: white; text-align: center; text-decoration: none; padding: 6px; margin-top: 8px; border-radius: 3px; font-size: 0.85rem; }}
+        .title {{ font-weight: bold; font-size: 0.9rem; text-align: center; margin-bottom: 5px; text-shadow: 1px 1px 2px black; }}
+        .meta {{ font-size: 0.8rem; color: #ddd; display: flex; justify-content: space-between; padding: 0 5px; }}
         
-        #loadMoreBtn {{ display: block; margin: 20px auto; padding: 12px 40px; background: #333; color: white; border: 1px solid #555; border-radius: 5px; cursor: pointer; }}
-        #loadMoreBtn:hover {{ background: #444; }}
-        #totalCount {{ font-size: 0.8rem; color: #777; margin-top: 5px; }}
+        .btn-watch {{ display: block; background: #E50914; color: white; text-align: center; text-decoration: none; padding: 8px; margin-top: 5px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; }}
+        
+        #loadMoreBtn {{ display: block; margin: 30px auto; padding: 15px 50px; background: #E50914; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1.1rem; }}
+        #loadMoreBtn:hover {{ background: #b20710; }}
+        #totalCount {{ font-size: 0.9rem; color: #888; margin-top: 5px; }}
     </style>
 </head>
 <body>
@@ -212,7 +223,7 @@ def create_html(films):
 <div class="header">
     <h1>Dizipal Arsiv</h1>
     <span id="totalCount">Yukleniyor...</span>
-    <input type="text" id="searchInput" placeholder="Film Ara..." oninput="handleSearch()">
+    <input type="text" id="searchInput" placeholder="Film, Dizi veya Oyuncu Ara..." oninput="handleSearch()">
 </div>
 
 <div class="container" id="filmContainer"></div>
@@ -231,17 +242,24 @@ def create_html(films):
     function createCard(film) {{
         const div = document.createElement('div');
         div.className = 'card';
+        // videoUrl varsa onu kullan, yoksa normal url'yi kullan
+        const targetLink = film.videoUrl ? film.videoUrl : film.url;
+        
         div.innerHTML = `
             <img src="${{film.image}}" loading="lazy" onerror="this.src='https://via.placeholder.com/200x300?text=Resim+Yok'">
             <div class="info">
-                <div class="title" title="${{film.title.replace(/"/g, '&quot;')}}">${{film.title}}</div>
+                <div class="title">${{film.title}}</div>
                 <div class="meta">
                     <span>${{film.year}}</span>
-                    <span class="imdb">${{film.imdb}}</span>
+                    <span>★ ${{film.imdb}}</span>
                 </div>
-                <a href="${{film.url}}" target="_blank" class="btn-watch">Izle</a>
+                <a href="${{targetLink}}" target="_blank" class="btn-watch">IZLE</a>
             </div>
         `;
+        // Kartın tamamına tıklayınca git
+        div.onclick = function(e) {{
+             if(e.target.tagName !== 'A') window.open(targetLink, '_blank');
+        }};
         return div;
     }}
 
@@ -251,7 +269,7 @@ def create_html(films):
         displayedCount += nextBatch.length;
         
         loadBtn.style.display = displayedCount >= currentList.length ? 'none' : 'block';
-        countLabel.innerText = `Toplam: ${{allFilms.length}} Film`;
+        countLabel.innerText = `Arsivdeki Toplam Icerik: ${{allFilms.length}}`;
     }}
 
     function loadMore() {{ render(); }}
@@ -279,6 +297,5 @@ if __name__ == "__main__":
     if data:
         create_html(data)
     else:
-        # Hata durumunda bile bos HTML olustur
         with open(HTML_FILE, 'w', encoding='utf-8') as f:
-            f.write("<h1>Bot calisti ama film cekemedi. Loglari kontrol et.</h1>")
+            f.write("<h1>Hata: Film verileri alinamadi.</h1>")
