@@ -7,7 +7,7 @@ import html
 from urllib.parse import urlparse
 
 # --- AYARLAR ---
-BASE_URL = os.environ.get('SITE_URL', 'https://dizipal1225.com/filmler')
+BASE_URL = os.environ.get('SITE_URL', 'https://dizipal.uk/filmler/')
 DATA_FILE = 'movies.json'
 HTML_FILE = 'index.html'
 
